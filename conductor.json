@@ -1,3 +1,5 @@
 {
-    "setup": "cp $CONDUCTOR_ROOT_PATH/.env ."
+    "scripts": {
+        "setup": "cp ~/Development/barista/.env ."
+    }
 }

@@ -142,3 +142,9 @@ cython_debug/
 *.swo
 *~
 .DS_Store
+
+# Fine-tuning outputs
+datasets/
+outputs/
+.finetune-cache/
+.barista-cache/
