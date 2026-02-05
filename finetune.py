@@ -13,6 +13,7 @@
 #     "wigglystuff==0.2.21",
 #     "wandb==0.24.2",
 #     "python-dotenv==1.2.1",
+#     "pydantic>=2.0.0",
 # ]
 # ///
 
@@ -55,6 +56,24 @@ def _():
 
 @app.cell
 def _():
+    from pydantic import BaseModel, Field, ConfigDict
+
+    class ModelParams(BaseModel):
+        num_epochs: int = Field(default=3, description="Number of training epochs.")
+        n_examples: int = Field(default=5, description="Number of training examples to use.")
+
+        model_config = ConfigDict(strict=True)
+    return (ModelParams,)
+
+
+@app.cell
+def _(ModelParams, mo):
+    model_params = ModelParams(**{k.replace("-", "_"): v for k, v in mo.cli_args()._params.items()})
+    return (model_params,)
+
+
+@app.cell
+def _():
     import json
     import pandas as pd
 
@@ -64,22 +83,36 @@ def _():
 
 
 @app.cell
-def _(mo):
-    model_dropdown = mo.ui.dropdown(
-        options={
-            "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
-            "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
+def _(mo, model_params):
+    config_form = mo.ui.batch(
+        mo.md("""
+        **Training Configuration**
+
+        Base Model: {model}
+
+        Training Examples: {n_examples}
+
+        Training Epochs: {n_epochs}
+        """),
+        {
+            "model": mo.ui.dropdown(
+                options={
+                    "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
+                    "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
+                },
+                value="Qwen 2.5 0.5B",
+                label="Base Model",
+            ),
+            "n_examples": mo.ui.slider(1, 100, value=model_params.n_examples, label="Training Examples"),
+            "n_epochs": mo.ui.slider(1, 10, value=model_params.num_epochs, label="Training Epochs"),
         },
-        value="Qwen 2.5 0.5B",
-        label="Base Model",
-    )
-    n_examples = mo.ui.slider(1, 100, value=5, label="Training Examples")
-    mo.hstack([model_dropdown, n_examples])
-    return model_dropdown, n_examples
+    ).form()
+    config_form
+    return (config_form,)
 
 
 @app.cell
-def _(json, n_examples, train_df):
+def _(config_form, json, train_df):
     def format_example(row) -> dict:
         return {
             "messages": [
@@ -89,7 +122,8 @@ def _(json, n_examples, train_df):
             ]
         }
 
-    training_data = [format_example(row) for _, row in train_df.head(n_examples.value).iterrows()]
+    _n_examples = config_form.value["n_examples"] if config_form.value else 5
+    training_data = [format_example(row) for _, row in train_df.head(_n_examples).iterrows()]
     print(f"Formatted {len(training_data)} examples")
     print(f"Example:\n{json.dumps(training_data[0], indent=2)[:300]}...")
     return (training_data,)
@@ -104,10 +138,10 @@ def _(mo):
 
 @app.cell
 def _(
+    config_form,
     device,
     env_config,
     json,
-    model_dropdown,
     os,
     torch,
     train_button,
@@ -116,8 +150,8 @@ def _(
 ):
     adapter_path = "outputs/adapters"
 
-    if train_button.value:
-        _model_name = model_dropdown.value
+    if train_button.value and config_form.value:
+        _model_name = config_form.value["model"]
 
         # Configure W&B if key is available
         _use_wandb = "WANDB_API_KEY" in env_config
@@ -196,7 +230,7 @@ def _(
         # Training
         _training_args = TrainingArguments(
             output_dir=adapter_path,
-            num_train_epochs=3,
+            num_train_epochs=config_form.value["n_epochs"],
             per_device_train_batch_size=1,
             gradient_accumulation_steps=4,
             learning_rate=1e-5,
@@ -262,15 +296,15 @@ def _(example_dropdown, json, mo, train_df):
 @app.cell
 def _(
     adapter_path,
+    config_form,
     device,
     expected_json,
     mo,
-    model_dropdown,
     os,
     test_order,
     torch,
 ):
-    _model_name = model_dropdown.value
+    _model_name = config_form.value["model"] if config_form.value else "Qwen/Qwen2.5-0.5B-Instruct"
     _base_output = ""
     _finetuned_output = ""
 
