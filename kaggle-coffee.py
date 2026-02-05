@@ -1,8 +1,10 @@
 # /// script
 # requires-python = ">=3.13"
 # dependencies = [
+#     "diskcache>=5.6.0",
 #     "marimo>=0.19.7",
 #     "ollama==0.6.1",
+#     "pandas>=2.0.0",
 #     "pydantic==2.12.5",
 #     "pydantic-ai==1.50.0",
 #     "python-dotenv==1.2.1",
@@ -40,15 +42,6 @@ def _(Item, Order):
 
 
 @app.cell
-def _():
-    import os 
-    from dotenv import load_dotenv
-
-    load_dotenv(".env");
-    return (os,)
-
-
-@app.cell
 async def _(Order, os):
     from pydantic_ai import Agent
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -69,12 +62,26 @@ async def _(Order, os):
 
 
     agent = Agent(
-        model, 
-        output_type=Order
+        model,
+        output_type=Order,
+        retries=3,  # Give LLM more attempts if validation fails
+        system_prompt="""You are a barista parsing coffee shop orders. Extract the FINAL order after processing any corrections.
+
+    Customers often change their mind mid-sentence using phrases like:
+    - "remove that", "scratch that", "nevermind", "cancel that"
+    - "wait no", "actually", "hold on"
+    - "make that X instead", "change that to"
+
+    When you see these corrections:
+    - If they cancel an item entirely, exclude it from the order
+    - If they cancel a modifier, exclude that modifier
+    - If they change a quantity ("make that two" or "bump that to three"), use the new quantity
+
+    Only output the final intended order after all corrections are applied.""",
     )
 
     response = await agent.run('Ill take two Lattes and a Bagel.')
-    return (response,)
+    return agent, response
 
 
 @app.cell
@@ -91,14 +98,38 @@ def _():
 @app.cell(column=1)
 def _():
     import marimo as mo
-    return
+    import os 
+    from dotenv import load_dotenv
+
+    load_dotenv(".env");
+    return (os,)
 
 
 @app.cell
 def _():
     from decimal import Decimal
-    from typing import Optional
+    from typing import Literal, Optional
     from pydantic import BaseModel, Field, model_validator, conint
+
+    # Literal types for valid menu items, sizes, and modifiers
+    ItemName = Literal[
+        "Espresso", "Americano", "Drip Coffee", "Latte", "Cappuccino",
+        "Flat White", "Mocha", "Caramel Macchiato", "Cold Brew", "Iced Coffee",
+        "Frappe (Coffee)", "Frappe (Mocha)", "Strawberry Smoothie", "Chai Latte",
+        "Matcha Latte", "Earl Grey Tea", "Green Tea", "Hot Chocolate",
+        "Butter Croissant", "Blueberry Muffin", "Bagel", "Avocado Toast",
+        "Bacon Gouda Sandwich"
+    ]
+
+    SizeName = Literal["Short", "Tall", "Grande", "Venti", "Trenta"]
+
+    ModifierName = Literal[
+        "Oat Milk", "Almond Milk", "Soy Milk", "Coconut Milk", "Breve",
+        "Skim Milk", "Vanilla Syrup", "Caramel Syrup", "Hazelnut Syrup",
+        "Peppermint Syrup", "Sugar Free Vanilla", "Classic Syrup", "Extra Shot",
+        "Whip Cream", "No Whip", "Cold Foam", "Caramel Drizzle", "Extra Hot",
+        "Light Ice", "No Ice"
+    ]
 
     BASE_PRICES = {
         "Espresso": 3.00,
@@ -139,7 +170,7 @@ def _():
         "Almond Milk": 0.60,
         "Soy Milk": 0.60,
         "Coconut Milk": 0.70,
-        "Breve (Half & Half)": 0.80,
+        "Breve": 0.80,
         "Skim Milk": 0.00,
         "Vanilla Syrup": 0.50,
         "Caramel Syrup": 0.50,
@@ -159,10 +190,10 @@ def _():
 
 
     class Item(BaseModel):
-        name: str
-        size: Optional[str] = None
+        name: ItemName
+        size: Optional[SizeName] = None
         quantity: conint(ge=1)
-        modifiers: list[str] = Field(default_factory=list)
+        modifiers: list[ModifierName] = Field(default_factory=list)
 
         @property
         def unit_price(self) -> Decimal:
@@ -183,25 +214,71 @@ def _():
 
     class Order(BaseModel):
         items: list[Item]
-        total_price: Optional[Decimal] = None
+        # Exclude from JSON schema so LLM doesn't try to generate it
+        total_price: Optional[Decimal] = Field(default=None, json_schema_extra={"hidden": True})
 
         @model_validator(mode="after")
-        def compute_or_validate_total(self):
-            computed = sum(i.line_total for i in self.items)
-
-            if self.total_price is None:
-                self.total_price = computed
-            elif self.total_price != computed:
-                raise ValueError(
-                    f"Total price mismatch: expected {computed}, got {self.total_price}"
-                )
-
+        def compute_total(self):
+            # Always compute total_price, ignoring any LLM-provided value
+            self.total_price = sum(i.line_total for i in self.items)
             return self
     return Item, Order
 
 
 @app.cell
 def _():
+    return
+
+
+@app.cell
+def _():
+    import json
+    import pandas as pd
+    from diskcache import Cache
+
+    train_df = pd.read_csv("barista-bench/train.csv")
+    sample_df = train_df.head(3)
+    cache = Cache(".barista-cache")
+    return cache, json, sample_df
+
+
+@app.cell
+async def _(agent, cache, json, sample_df):
+    results = []
+    for idx, row in sample_df.iterrows():
+        order_text = row['order']
+
+        if order_text in cache:
+            predicted = cache[order_text]
+        else:
+            _response = await agent.run(order_text)
+            predicted = _response.output.model_dump()
+            cache[order_text] = predicted
+
+        expected = json.loads(row['expected_json'])
+        match = predicted == expected
+        results.append({
+            'id': row['id'],
+            'order': order_text,
+            'predicted': predicted,
+            'expected': expected,
+            'match': match
+        })
+
+    disagreements = [r for r in results if not r['match']]
+    accuracy = (len(results) - len(disagreements)) / len(results)
+    return accuracy, disagreements
+
+
+@app.cell
+def _(accuracy, disagreements):
+    print(f"Accuracy: {accuracy:.1%} ({len(disagreements)} disagreements)")
+    return
+
+
+@app.cell
+def _(disagreements):
+    disagreements[0]
     return
 
 
