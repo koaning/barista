@@ -13,6 +13,7 @@
 #     "wigglystuff==0.2.21",
 #     "wandb==0.24.2",
 #     "python-dotenv==1.2.1",
+#     "pydantic>=2.0.0",
 # ]
 # ///
 
@@ -55,41 +56,84 @@ def _():
 
 @app.cell
 def _():
+    from pydantic import BaseModel, Field, ConfigDict
+
+    class ModelParams(BaseModel):
+        model: str = Field(default="Qwen/Qwen2.5-0.5B-Instruct", description="HuggingFace model ID.")
+        prompt: str = Field(default="end-to-end", description="Prompt strategy: end-to-end, simplification, or structured-output.")
+        num_epochs: int = Field(default=100, description="Number of training epochs.")
+        n_examples: int = Field(default=5, description="Number of training examples to use.")
+
+        model_config = ConfigDict(strict=True)
+    return (ModelParams,)
+
+
+@app.cell
+def _(ModelParams, mo):
+    model_params = ModelParams(**{k.replace("-", "_"): v for k, v in mo.cli_args()._params.items()})
+    return (model_params,)
+
+
+@app.cell
+def _(model_params):
     import json
     import pandas as pd
+    from pathlib import Path
 
     train_df = pd.read_csv("input/train.csv")
+    _prompt_path = Path(f"input/prompts/{model_params.prompt}/v1.md")
+    system_prompt = _prompt_path.read_text()
     print(f"Loaded {len(train_df)} training examples")
-    return json, train_df
+    print(f"System prompt ({model_params.prompt}): {len(system_prompt)} chars")
+    return json, system_prompt, train_df
 
 
 @app.cell
-def _(mo):
-    model_dropdown = mo.ui.dropdown(
-        options={
-            "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
-            "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
+def _(mo, model_params):
+    _model_options = {
+        "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
+        "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
+    }
+    _model_id_to_name = {v: k for k, v in _model_options.items()}
+    _default_model_name = _model_id_to_name.get(model_params.model, "Qwen 2.5 0.5B")
+
+    config_form = mo.ui.batch(
+        mo.md("""
+        **Training Configuration**
+
+        Base Model: {model}
+
+        Training Examples: {n_examples}
+
+        Training Epochs: {n_epochs}
+        """),
+        {
+            "model": mo.ui.dropdown(
+                options=_model_options,
+                value=_default_model_name,
+                label="Base Model",
+            ),
+            "n_examples": mo.ui.slider(1, 1000, value=model_params.n_examples, label="Training Examples"),
+            "n_epochs": mo.ui.slider(1, 1500, step=10, value=model_params.num_epochs, label="Training Epochs"),
         },
-        value="Qwen 2.5 0.5B",
-        label="Base Model",
-    )
-    n_examples = mo.ui.slider(1, 100, value=5, label="Training Examples")
-    mo.hstack([model_dropdown, n_examples])
-    return model_dropdown, n_examples
+    ).form()
+    config_form
+    return (config_form,)
 
 
 @app.cell
-def _(json, n_examples, train_df):
+def _(config_form, json, system_prompt, train_df):
     def format_example(row) -> dict:
         return {
             "messages": [
-                {"role": "system", "content": "Parse this coffee order to JSON."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": row["order"]},
                 {"role": "assistant", "content": row["expected_json"]},
             ]
         }
 
-    training_data = [format_example(row) for _, row in train_df.head(n_examples.value).iterrows()]
+    _n_examples = config_form.value["n_examples"] if config_form.value else 5
+    training_data = [format_example(row) for _, row in train_df.head(_n_examples).iterrows()]
     print(f"Formatted {len(training_data)} examples")
     print(f"Example:\n{json.dumps(training_data[0], indent=2)[:300]}...")
     return (training_data,)
@@ -104,10 +148,11 @@ def _(mo):
 
 @app.cell
 def _(
+    config_form,
     device,
     env_config,
     json,
-    model_dropdown,
+    model_params,
     os,
     torch,
     train_button,
@@ -116,15 +161,34 @@ def _(
 ):
     adapter_path = "outputs/adapters"
 
-    if train_button.value:
-        _model_name = model_dropdown.value
+    if train_button.value and config_form.value:
+        _model_name = config_form.value["model"]
 
         # Configure W&B if key is available
         _use_wandb = "WANDB_API_KEY" in env_config
         if _use_wandb:
             import wandb
+            from datetime import datetime
             os.environ["WANDB_API_KEY"] = env_config["WANDB_API_KEY"]
-            wandb.init(project="barista-finetune", name=f"{_model_name.split('/')[-1]}-lora")
+            _run_name = f"{_model_name.split('/')[-1]}-lora-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            wandb.init(
+                project="barista-finetune",
+                name=_run_name,
+                resume="never",
+                config={
+                    "model": _model_name,
+                    "prompt": model_params.prompt,
+                    "num_epochs": config_form.value["n_epochs"],
+                    "n_examples": config_form.value["n_examples"],
+                    "learning_rate": 1e-5,
+                    "batch_size": 1,
+                    "gradient_accumulation_steps": 4,
+                    "lora_r": 8,
+                    "lora_alpha": 16,
+                    "lora_dropout": 0.05,
+                    "max_length": 512,
+                },
+            )
 
         # Write training data to data dir
         os.makedirs("outputs", exist_ok=True)
@@ -196,7 +260,7 @@ def _(
         # Training
         _training_args = TrainingArguments(
             output_dir=adapter_path,
-            num_train_epochs=3,
+            num_train_epochs=config_form.value["n_epochs"],
             per_device_train_batch_size=1,
             gradient_accumulation_steps=4,
             learning_rate=1e-5,
@@ -220,6 +284,9 @@ def _(
         _model.save_pretrained(adapter_path)
         _tokenizer.save_pretrained(adapter_path)
         print(f"Training complete! Adapters saved to {adapter_path}")
+
+        if _use_wandb:
+            wandb.finish()
     return (adapter_path,)
 
 
@@ -262,15 +329,37 @@ def _(example_dropdown, json, mo, train_df):
 @app.cell
 def _(
     adapter_path,
+    config_form,
     device,
     expected_json,
+    json,
     mo,
-    model_dropdown,
     os,
+    system_prompt,
     test_order,
     torch,
 ):
-    _model_name = model_dropdown.value
+    from schema import Order
+
+    def _format_json(text: str) -> str:
+        """Try to parse and pretty-print JSON, return original if parsing fails."""
+        try:
+            return json.dumps(json.loads(text), indent=2)
+        except (json.JSONDecodeError, TypeError):
+            return text
+
+    def _get_price(text: str) -> str:
+        """Try to parse JSON and validate with Order schema, return price or error."""
+        try:
+            data = json.loads(text)
+            order = Order(**data)
+            return f"**Total: ${order.total_price:.2f}**"
+        except json.JSONDecodeError:
+            return "_Invalid JSON_"
+        except Exception as e:
+            return f"_Schema error: {type(e).__name__}_"
+
+    _model_name = config_form.value["model"] if config_form.value else "Qwen/Qwen2.5-0.5B-Instruct"
     _base_output = ""
     _finetuned_output = ""
 
@@ -280,7 +369,7 @@ def _(
         from peft import PeftModel as _PeftModel
 
         _messages = [
-            {"role": "system", "content": "Parse this coffee order to JSON."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": test_order},
         ]
 
@@ -328,14 +417,17 @@ def _(
         mo.vstack([
             mo.md("### Expected"),
             mo.md(f"```json\n{expected_json}\n```"),
+            mo.md(_get_price(expected_json)),
         ]),
         mo.vstack([
             mo.md("### Base Model"),
-            mo.md(f"```json\n{_base_output}\n```"),
+            mo.md(f"```json\n{_format_json(_base_output)}\n```"),
+            mo.md(_get_price(_base_output)),
         ]),
         mo.vstack([
             mo.md("### Finetuned"),
-            mo.md(f"```json\n{_finetuned_output}\n```"),
+            mo.md(f"```json\n{_format_json(_finetuned_output)}\n```"),
+            mo.md(_get_price(_finetuned_output)),
         ]),
     ])
     return

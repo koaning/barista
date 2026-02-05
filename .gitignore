@@ -146,5 +146,6 @@ cython_debug/
 # Fine-tuning outputs
 datasets/
 outputs/
+wandb/
 .finetune-cache/
 .barista-cache/
