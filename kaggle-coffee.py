@@ -56,7 +56,7 @@ async def _(Order, os):
     ollama_provider = OllamaProvider(base_url='http://localhost:11434/v1')
 
     model = OpenAIChatModel(
-        model_name="openai/gpt-oss-20b",
+        model_name="openai/gpt-oss-120b",
         provider=wandb_provider,  
     )
 
@@ -64,6 +64,25 @@ async def _(Order, os):
     agent = Agent(
         model,
         output_type=Order,
+        retries=3,  # Give LLM more attempts if validation fails
+        system_prompt="""You are a barista parsing coffee shop orders. Extract the FINAL order after processing any corrections. Only output the final intended order after all corrections are applied.""",
+    )
+
+    response = await agent.run('Ill take two Lattes and a Bagel.')
+    return Agent, agent, model, response
+
+
+@app.cell
+def _(response):
+    response.output.model_dump()
+    return
+
+
+@app.cell
+async def _(Agent, model):
+    agent_simplify = Agent(
+        model,
+        output_type=str,
         retries=3,  # Give LLM more attempts if validation fails
         system_prompt="""You are a barista parsing coffee shop orders. Extract the FINAL order after processing any corrections.
 
@@ -77,16 +96,99 @@ async def _(Order, os):
     - If they cancel a modifier, exclude that modifier
     - If they change a quantity ("make that two" or "bump that to three"), use the new quantity
 
+    All orders must come from the official menu. 
+
+    ## 1. HOT COFFEES
+    - Espresso
+    - Americano
+    - Drip Coffee
+    - Latte
+    - Cappuccino
+    - Flat White
+    - Mocha
+    - Caramel Macchiato
+
+    ## 2. COLD / BLENDED
+    - Cold Brew
+    - Iced Coffee
+    - Frappe (Coffee)
+    - Frappe (Mocha)
+    - Strawberry Smoothie
+
+    ## 3. TEAS & OTHERS
+    - Chai Latte
+    - Matcha Latte
+    - Earl Grey Tea
+    - Green Tea
+    - Hot Chocolate
+
+    ## 4. FOOD (No modifiers allowed usually)
+    - Butter Croissant
+    - Blueberry Muffin
+    - Bagel
+    - Avocado Toast
+    - Bacon Gouda Sandwich
+
+    ## 5. SIZES (Drink Price Adjustments)
+    - Short (8oz)
+    - Tall (12oz)
+    - Grande (16oz)
+    - Venti (20oz)
+    - Trenta (30oz)
+
+    ## 6. MODIFIERS
+    ### Milks (Replaces default)
+    - Oat Milk
+    - Almond Milk
+    - Soy Milk
+    - Coconut Milk
+    - Breve (Half & Half)
+    - Skim Milk
+
+    ### Syrups (Add-on)
+    - Vanilla Syrup
+    - Caramel Syrup
+    - Hazelnut Syrup
+    - Peppermint Syrup
+    - Sugar Free Vanilla
+    - Classic Syrup
+
+    ### Toppings / Texture
+    - Extra Shot
+    - Whip Cream
+    - No Whip
+    - Cold Foam
+    - Caramel Drizzle
+    - Extra Hot
+    - Light Ice
+    - No Ice
+
+    ## 7. LOGIC RULES
+    - **Replacement:** If a user asks for a milk (e.g., Oat), it replaces the default.
+    - **Cancellation:** If a user says "No Whip" on a drink that has Whip (like Mocha), the price does not change, but "No Whip" is noted.
+    - **Double Mods:** Syrups stack (Vanilla + Caramel = +$1.00).
+    - **Food:** Food items do not have sizes.
+
     Only output the final intended order after all corrections are applied.""",
     )
 
-    response = await agent.run('Ill take two Lattes and a Bagel.')
-    return agent, response
+    _response = await agent_simplify.run("Lemme get one tall Strawberry Smoothie include caramel drizzle - remove uh that. Next, I need a like venti drip coffee and extra hot. Oh, and add three trenta chai latte include Sugar Free Vanilla... scratch that one Sugar Free Vanilla. caramel drizzle and make sure no whip. Oh, and add double short mochas.")
+
+    print(_response.output)
+    return
 
 
 @app.cell
-def _(response):
-    response.output.model_dump()
+async def _(agent):
+    _response = await agent.run("""
+    **Final Order**
+
+    - Venti Drip Coffee – Extra Hot  
+    - 3 × Trenta Chai Latte – Caramel Drizzle, No Whip  
+    - 2 × Short Mocha
+    """)
+
+    _response.output.model_dump()
     return
 
 
@@ -267,12 +369,18 @@ async def _(agent, cache, json, sample_df):
 
     disagreements = [r for r in results if not r['match']]
     accuracy = (len(results) - len(disagreements)) / len(results)
-    return accuracy, disagreements
+    return accuracy, disagreements, results
 
 
 @app.cell
 def _(accuracy, disagreements):
     print(f"Accuracy: {accuracy:.1%} ({len(disagreements)} disagreements)")
+    return
+
+
+@app.cell
+def _(results):
+    results
     return
 
 
