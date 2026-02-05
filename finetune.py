@@ -58,7 +58,7 @@ def _():
     import json
     import pandas as pd
 
-    train_df = pd.read_csv("barista-bench/train.csv")
+    train_df = pd.read_csv("input/train.csv")
     print(f"Loaded {len(train_df)} training examples")
     return json, train_df
 

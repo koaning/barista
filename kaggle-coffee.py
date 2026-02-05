@@ -225,7 +225,7 @@ def _():
     import pandas as pd
     from diskcache import Cache
 
-    train_df = pd.read_csv("barista-bench/train.csv")
+    train_df = pd.read_csv("input/train.csv")
     sample_df = train_df.head(3)
     cache = Cache(".barista-cache")
     return cache, json, sample_df
