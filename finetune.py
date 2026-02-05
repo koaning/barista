@@ -59,6 +59,8 @@ def _():
     from pydantic import BaseModel, Field, ConfigDict
 
     class ModelParams(BaseModel):
+        model: str = Field(default="Qwen/Qwen2.5-0.5B-Instruct", description="HuggingFace model ID.")
+        prompt: str = Field(default="end-to-end", description="Prompt strategy: end-to-end, simplification, or structured-output.")
         num_epochs: int = Field(default=100, description="Number of training epochs.")
         n_examples: int = Field(default=5, description="Number of training examples to use.")
 
@@ -73,20 +75,28 @@ def _(ModelParams, mo):
 
 
 @app.cell
-def _():
+def _(model_params):
     import json
     import pandas as pd
     from pathlib import Path
 
     train_df = pd.read_csv("input/train.csv")
-    system_prompt = Path("input/prompts/end-to-end/v1.md").read_text()
+    _prompt_path = Path(f"input/prompts/{model_params.prompt}/v1.md")
+    system_prompt = _prompt_path.read_text()
     print(f"Loaded {len(train_df)} training examples")
-    print(f"System prompt: {len(system_prompt)} chars")
+    print(f"System prompt ({model_params.prompt}): {len(system_prompt)} chars")
     return json, system_prompt, train_df
 
 
 @app.cell
 def _(mo, model_params):
+    _model_options = {
+        "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
+        "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
+    }
+    _model_id_to_name = {v: k for k, v in _model_options.items()}
+    _default_model_name = _model_id_to_name.get(model_params.model, "Qwen 2.5 0.5B")
+
     config_form = mo.ui.batch(
         mo.md("""
         **Training Configuration**
@@ -99,11 +109,8 @@ def _(mo, model_params):
         """),
         {
             "model": mo.ui.dropdown(
-                options={
-                    "Qwen 2.5 3B": "Qwen/Qwen2.5-3B-Instruct",
-                    "Qwen 2.5 0.5B": "Qwen/Qwen2.5-0.5B-Instruct",
-                },
-                value="Qwen 2.5 0.5B",
+                options=_model_options,
+                value=_default_model_name,
                 label="Base Model",
             ),
             "n_examples": mo.ui.slider(1, 1000, value=model_params.n_examples, label="Training Examples"),
@@ -145,6 +152,7 @@ def _(
     device,
     env_config,
     json,
+    model_params,
     os,
     torch,
     train_button,
@@ -169,6 +177,7 @@ def _(
                 resume="never",
                 config={
                     "model": _model_name,
+                    "prompt": model_params.prompt,
                     "num_epochs": config_form.value["n_epochs"],
                     "n_examples": config_form.value["n_examples"],
                     "learning_rate": 1e-5,
